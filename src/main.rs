@@ -5,6 +5,7 @@ use chrono::Utc;
 use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg, ArgMatches};
 use itertools::Itertools;
 use multipart::client::{HttpRequest, HttpStream, Multipart};
+use qrcodegen::{QrCode, QrCodeEcc};
 use regex::Regex;
 use ring::{
   aead::{Aad, BoundKey, Nonce, NonceSequence, SealingKey, UnboundKey, AES_256_GCM, NONCE_LEN},
@@ -28,6 +29,8 @@ enum MainError {
   Template(#[from] tera::Error),
   #[error("failed to transcode plaintext for inline display")]
   TranscodePlaintext(#[source] std::str::Utf8Error),
+  #[error(transparent)]
+  QrCode(#[from] qrcodegen::DataTooLong),
 }
 
 impl From<ring::error::Unspecified> for MainError {
@@ -197,8 +200,11 @@ fn file_io_upload(mut data: &[u8]) -> Result<String, MainError> {
   }
 }
 
-fn output_qrcode(_data: &str) -> Result<(), MainError> {
-  todo!();
+fn output_qrcode(data: &str) -> Result<(), MainError> {
+  let qr = QrCode::encode_text(data, QrCodeEcc::Low)?;
+  let svg = qr.to_svg_string(10);
+  println!("{}", svg);
+  Ok(())
 }
 
 fn seal(rng: &impl SecureRandom, plaintext: Vec<u8>) -> Result<SealedMessage, MainError> {
