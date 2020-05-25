@@ -69,7 +69,7 @@
           let dataview = new DataView(plaintext);
           let shorts = [];
           for (let i = 0; i < dataview.byteLength; i += 2) {
-            shorts.push(plaintext.getUint16(i, true));
+            shorts.push(dataview.getUint16(i, true));
           }
           let text = String.fromCharCode.apply(null, shorts);
           document.getElementById("plaintext").textContent = text;

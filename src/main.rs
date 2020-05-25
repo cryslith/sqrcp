@@ -24,8 +24,10 @@ enum MainError {
   FileIO(String),
   #[error("upload failed")]
   Upload,
-  #[error("templating webpage")]
+  #[error("webpage templating error")]
   Template(#[from] tera::Error),
+  #[error("failed to transcode plaintext for inline display")]
+  TranscodePlaintext(#[source] std::str::Utf8Error),
 }
 
 impl From<ring::error::Unspecified> for MainError {
@@ -119,11 +121,19 @@ fn data_url(matches: &ArgMatches, data: &[u8]) -> Result<String, MainError> {
   ))
 }
 
-fn webpage(matches: &ArgMatches, plaintext: Vec<u8>, inline: bool) -> Result<String, MainError> {
+fn webpage(
+  matches: &ArgMatches,
+  mut plaintext: Vec<u8>,
+  inline: bool,
+) -> Result<String, MainError> {
   let rng = SystemRandom::new();
 
   if inline {
-    todo!("need to transcode input into UTF-16");
+    plaintext = std::str::from_utf8(&plaintext[..])
+      .map_err(MainError::TranscodePlaintext)?
+      .encode_utf16()
+      .flat_map(|x| x.to_le_bytes().to_vec())
+      .collect();
   }
 
   let SealedMessage {
@@ -140,8 +150,6 @@ fn webpage(matches: &ArgMatches, plaintext: Vec<u8>, inline: bool) -> Result<Str
     "file.io" => file_io_upload(&ciphertext[..])?,
     _ => panic!("invalid uploader"),
   };
-
-  println!("ciphertext: {}", ciphertext_url);
 
   let mut context = Context::new();
   context.insert("inline", &inline);
