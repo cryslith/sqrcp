@@ -356,12 +356,6 @@ fn seal(rng: &impl SecureRandom, plaintext: Vec<u8>) -> Result<SealedMessage, Ma
 
 struct OneNonceSequence(Option<Nonce>);
 
-impl OneNonceSequence {
-  fn new(nonce: Nonce) -> Self {
-    Self(Some(nonce))
-  }
-}
-
 impl NonceSequence for OneNonceSequence {
   fn advance(&mut self) -> Result<Nonce, ring::error::Unspecified> {
     self.0.take().ok_or(ring::error::Unspecified)
