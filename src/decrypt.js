@@ -38,14 +38,14 @@ async function readAll(stream, length) {
 }
 
 async function main(params) {
-  const { inline, ciphertext, key, nonce, mimetype, filename } = params;
+  const { inline, ciphertext: cipherURL, key: keyBytes, nonce: nonceBytes, mimetype, filename } = params;
 
   let message = document.getElementById("message");
 
   try {
-    let key = new Uint8Array(key);
-    let nonce = new Uint8Array(nonce);
-    let response = await fetch(ciphertext);
+    let key = new Uint8Array(keyBytes);
+    let nonce = new Uint8Array(nonceBytes);
+    let response = await fetch(cipherURL);
     if (!response.ok) {
       throw new Error(`fetching ciphertext: ${response.statusText}`);
     }
@@ -73,7 +73,7 @@ async function main(params) {
     }
   } catch (e) {
     message.textContent = `error: ${e}`;
-    return;
+    throw e;
   }
 
   console.log("success");

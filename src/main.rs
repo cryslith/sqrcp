@@ -1,5 +1,6 @@
 use std::error::Error as _;
 use std::fs::File;
+use std::future::Future;
 use std::io::{stdin, Read, Write};
 
 use chrono::Utc;
@@ -11,6 +12,7 @@ use hyper::{
 };
 use itertools::Itertools;
 use multipart::client::{HttpRequest, HttpStream, Multipart};
+use pnet::datalink;
 use qrcodegen::{QrCode, QrCodeEcc};
 use regex::Regex;
 use ring::{
@@ -23,12 +25,16 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 enum MainError {
-  #[error(transparent)]
-  IO(#[from] std::io::Error),
+  #[error("couldn't autodetect local IP")]
+  DetectLocalIP,
   #[error("encryption failed")]
   EncryptionFailed,
   #[error("file.io returned error: {0}")]
   FileIO(String),
+  #[error("error running self-host server")]
+  Hyper(#[from] hyper::Error),
+  #[error(transparent)]
+  IO(#[from] std::io::Error),
   #[error("upload failed")]
   Upload,
   #[error("webpage templating error")]
@@ -45,7 +51,8 @@ impl From<ring::error::Unspecified> for MainError {
   }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
   let matches = App::new(crate_name!())
     .version(crate_version!())
     .author(crate_authors!())
@@ -79,13 +86,13 @@ fn main() {
         .default_value("application/octet-stream"),
     )
     .arg(
-      Arg::from_usage("[FILE]")
+      Arg::from_usage("[file]")
         .required_unless("data")
         .conflicts_with("data"),
     )
     .get_matches();
 
-  std::process::exit(match run(matches) {
+  std::process::exit(match run(matches).await {
     Ok(_) => 0,
     Err(e) => {
       eprintln!("error: {}", e);
@@ -99,7 +106,7 @@ fn main() {
   });
 }
 
-fn run(matches: ArgMatches) -> Result<(), MainError> {
+async fn run(matches: ArgMatches<'_>) -> Result<(), MainError> {
   // need a Vec for ring's encryption
   let input: Vec<u8> = match (matches.value_of("data"), matches.value_of("file")) {
     (None, None) | (Some(_), Some(_)) => panic!("need data xor file"),
@@ -115,21 +122,23 @@ fn run(matches: ArgMatches) -> Result<(), MainError> {
     }
   };
 
-  let output = match matches.value_of("mode").unwrap() {
-    "data" => data_url(&matches, &input[..]),
-    "webpage" => webpage(&matches, input, false),
-    "inline-webpage" => webpage(&matches, input, true),
+  let (output, server) = match matches.value_of("mode").unwrap() {
+    "data" => (data_url(&matches, &input[..])?, None),
+    "webpage" => webpage(&matches, input, false)?,
+    "inline-webpage" => webpage(&matches, input, true)?,
     _ => panic!("invalid mode"),
-  }?;
+  };
 
   match matches.value_of("output").unwrap() {
-    "print" => {
-      println!("{}", output);
-      Ok(())
-    }
-    "qrcode" => output_qrcode(&output[..]),
+    "print" => println!("{}", output),
+    "qrcode" => output_qrcode(&output[..])?,
     _ => panic!("invalid output"),
   }
+
+  if let Some(server) = server {
+    server.await?;
+  }
+  Ok(())
 }
 
 struct SealedMessage {
@@ -150,7 +159,13 @@ fn webpage(
   matches: &ArgMatches,
   mut plaintext: Vec<u8>,
   inline: bool,
-) -> Result<String, MainError> {
+) -> Result<
+  (
+    String,
+    Option<impl Future<Output = Result<(), hyper::Error>>>,
+  ),
+  MainError,
+> {
   let rng = SystemRandom::new();
 
   if inline {
@@ -194,6 +209,16 @@ fn webpage(
   } else {
     None
   };
+  let mut server_addr = if let Some(ref server) = server {
+    let mut addr = server.local_addr();
+    let local_ip = datalink::interfaces().iter()
+      .find(|x| !x.is_loopback() && !x.ips.is_empty())
+      .ok_or(MainError::DetectLocalIP)?.ips[0].ip();
+    addr.set_ip(local_ip);
+    Some(addr)
+  } else {
+    None
+  };
 
   let decryptjs_source = match matches.value_of("host").unwrap() {
     "self-host" => {
@@ -201,8 +226,7 @@ fn webpage(
         "sha512-{}",
         base64::encode(digest(&SHA512, decryptjs.as_bytes()).as_ref())
       );
-      // server.unwrap().local_addr()
-      DecryptSource::Hosted(todo!(), integrity) // todo fix this
+      DecryptSource::Hosted(format!("http://{}/decrypt.js", server_addr.unwrap()), integrity)
     }
     "inline" => DecryptSource::Unhosted(decryptjs.to_string()),
     _ => panic!("invalid host"),
@@ -213,8 +237,7 @@ fn webpage(
       "data:application/octet-stream;base64,{}",
       base64::encode(ciphertext),
     ),
-    // server.unwrap().local_addr()
-    "self-host" => todo!(), // todo fix this
+    "self-host" => format!("http://{}/ciphertext", server_addr.unwrap()),
     "file.io" => file_io_upload(&ciphertext[..])?,
     _ => panic!("invalid uploader"),
   };
@@ -224,12 +247,12 @@ fn webpage(
   match decryptjs_source {
     DecryptSource::Hosted(url, integrity) => {
       context.insert("hosted", &true);
-      context.insert("hosted-decrypt", &url);
-      // context.insert("hosted-decrypt-integrity", todo!());
+      context.insert("hosted_decrypt", &url);
+      context.insert("hosted_decrypt_integrity", &integrity);
     }
     DecryptSource::Unhosted(source) => {
       context.insert("hosted", &false);
-      context.insert("unhosted-decrypt", &source);
+      context.insert("unhosted_decrypt", &source);
     }
   }
   context.insert("key", &format!("[{}]", key.into_iter().join(", ")));
@@ -247,9 +270,12 @@ fn webpage(
   let webpage = Regex::new(r#"[[:space:]]+"#)
     .unwrap()
     .replace_all(&webpage[..], " ");
-  Ok(format!(
-    "data:text/html;charset=utf-8;base64,{}",
-    base64::encode(webpage.as_bytes()),
+  Ok((
+    format!(
+      "data:text/html;charset=utf-8;base64,{}",
+      base64::encode(webpage.as_bytes()),
+    ),
+    server,
   ))
 }
 
@@ -261,9 +287,11 @@ async fn self_hoster(
   match (req.method(), req.uri().path(), decrypt_js, ciphertext) {
     (&Method::GET, "/decrypt.js", Some(decryptjs), _) => Response::builder()
       .header("Content-Type", "text/javascript")
+      .header("Access-Control-Allow-Origin", "*")
       .body(decryptjs.into()),
     (&Method::GET, "/ciphertext", _, Some(ciphertext)) => Response::builder()
-      .header("Content-Type", "application/octet-stream")
+      .header("Content-Type", "application/octet-stream") 
+      .header("Access-Control-Allow-Origin", "*")
       .body(ciphertext.into()),
     _ => {
       let mut not_found = Response::default();

@@ -8,10 +8,11 @@
     <a id="download"></a>
     {% endif %}
     {% if hosted %}
-    <script type="text/javascript" href="{{ hosted-decrypt }}"
-            integrity="{{ hosted-decrypt-integrity }}"></script>
+    <script type="text/javascript" src="{{ hosted_decrypt }}"
+            integrity="{{ hosted_decrypt_integrity }}"
+            crossorigin="anonymous"></script>
     {% else %}
-    <script type="text/javascript">{{ unhosted-decrypt }}</script>
+    <script type="text/javascript">{{ unhosted_decrypt }}</script>
     {% endif %}
     <script type="text/javascript">
       main({
