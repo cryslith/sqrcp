@@ -1,19 +1,25 @@
 use std::error::Error as _;
+use std::fs::File;
 use std::io::{stdin, Read, Write};
 
 use chrono::Utc;
 use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg, ArgMatches};
+use hyper::{
+  http,
+  service::{make_service_fn, service_fn},
+  Body, Method, Request, Response, Server, StatusCode,
+};
 use itertools::Itertools;
 use multipart::client::{HttpRequest, HttpStream, Multipart};
 use qrcodegen::{QrCode, QrCodeEcc};
 use regex::Regex;
 use ring::{
   aead::{Aad, BoundKey, Nonce, NonceSequence, SealingKey, UnboundKey, AES_256_GCM, NONCE_LEN},
+  digest::{digest, SHA512},
   rand::{SecureRandom, SystemRandom},
 };
 use tera::{Context, Tera};
 use thiserror::Error;
-use ureq::SerdeValue;
 
 #[derive(Debug, Error)]
 enum MainError {
@@ -50,22 +56,32 @@ fn main() {
         .default_value("webpage"),
     )
     .arg(
-      Arg::from_usage("-u, --uploader=[UPLOADER]")
-        .possible_values(&["test-inline", "file.io"])
-        .default_value("file.io"),
+      Arg::from_usage("-h, --host=[HOST] 'where javascript is hosted'")
+        .possible_values(&["inline", "self-host"])
+        .default_value("self-host"),
+    )
+    .arg(
+      Arg::from_usage("-u, --uploader=[UPLOADER] 'where to upload ciphertext'")
+        .possible_values(&["test-inline", "self-host", "file.io"])
+        .default_value("self-host"),
     )
     .arg(
       Arg::from_usage("-o, --output=[OUTPUT] 'output type'")
         .possible_values(&["print", "qrcode"])
         .default_value("print"),
     )
-    .arg_from_usage("--data=[DATA] 'specify input data directly instead of reading stdin'")
+    .arg_from_usage("--data=[DATA] 'specify input data directly instead of reading file'")
     .arg(Arg::from_usage(
       "--filename=[FILENAME] 'filename of download'",
     ))
     .arg(
       Arg::from_usage("--mimetype=[MIMETYPE] 'mime type of download")
         .default_value("application/octet-stream"),
+    )
+    .arg(
+      Arg::from_usage("[FILE]")
+        .required_unless("data")
+        .conflicts_with("data"),
     )
     .get_matches();
 
@@ -84,11 +100,17 @@ fn main() {
 }
 
 fn run(matches: ArgMatches) -> Result<(), MainError> {
-  let input = match matches.value_of("data") {
-    Some(x) => x.as_bytes().to_owned(),
-    None => {
+  // need a Vec for ring's encryption
+  let input: Vec<u8> = match (matches.value_of("data"), matches.value_of("file")) {
+    (None, None) | (Some(_), Some(_)) => panic!("need data xor file"),
+    (Some(x), None) => x.as_bytes().to_owned(),
+    (None, Some(f)) => {
       let mut buffer = vec![];
-      stdin().read_to_end(&mut buffer)?;
+      if f == "-" {
+        stdin().read_to_end(&mut buffer)?;
+      } else {
+        File::open(f)?.read_to_end(&mut buffer)?;
+      }
       buffer
     }
   };
@@ -145,23 +167,77 @@ fn webpage(
     ciphertext,
   } = seal(&rng, plaintext)?;
 
+  let decryptjs = include_str!("decrypt.js");
+
+  let host_decryptjs = if matches.value_of("host") == Some("self-host") {
+    Some(decryptjs.to_string())
+  } else {
+    None
+  };
+  let host_ciphertext = if matches.value_of("uploader") == Some("self-host") {
+    Some(ciphertext.clone())
+  } else {
+    None
+  };
+  let server = if host_decryptjs.is_some() || host_ciphertext.is_some() {
+    let make_service = make_service_fn(move |_| {
+      let host_decryptjs1 = host_decryptjs.clone();
+      let host_ciphertext1 = host_ciphertext.clone();
+      async move {
+        Ok::<_, hyper::Error>(service_fn(move |req| {
+          self_hoster(host_decryptjs1.clone(), host_ciphertext1.clone(), req)
+        }))
+      }
+    });
+
+    Some(Server::bind(&([0, 0, 0, 0], 0).into()).serve(make_service))
+  } else {
+    None
+  };
+
+  let decryptjs_source = match matches.value_of("host").unwrap() {
+    "self-host" => {
+      let integrity = format!(
+        "sha512-{}",
+        base64::encode(digest(&SHA512, decryptjs.as_bytes()).as_ref())
+      );
+      // server.unwrap().local_addr()
+      DecryptSource::Hosted(todo!(), integrity) // todo fix this
+    }
+    "inline" => DecryptSource::Unhosted(decryptjs.to_string()),
+    _ => panic!("invalid host"),
+  };
+
   let ciphertext_url = match matches.value_of("uploader").unwrap() {
     "test-inline" => format!(
       "data:application/octet-stream;base64,{}",
       base64::encode(ciphertext),
     ),
+    // server.unwrap().local_addr()
+    "self-host" => todo!(), // todo fix this
     "file.io" => file_io_upload(&ciphertext[..])?,
     _ => panic!("invalid uploader"),
   };
 
   let mut context = Context::new();
   context.insert("inline", &inline);
+  match decryptjs_source {
+    DecryptSource::Hosted(url, integrity) => {
+      context.insert("hosted", &true);
+      context.insert("hosted-decrypt", &url);
+      // context.insert("hosted-decrypt-integrity", todo!());
+    }
+    DecryptSource::Unhosted(source) => {
+      context.insert("hosted", &false);
+      context.insert("unhosted-decrypt", &source);
+    }
+  }
   context.insert("key", &format!("[{}]", key.into_iter().join(", ")));
   context.insert("nonce", &format!("[{}]", nonce.iter().join(", ")));
-  context.insert("ciphertext_url", &ciphertext_url);
-  context.insert("download_mimetype", matches.value_of("mimetype").unwrap());
+  context.insert("ciphertext", &ciphertext_url);
+  context.insert("mimetype", matches.value_of("mimetype").unwrap());
   context.insert(
-    "download_filename",
+    "filename",
     &matches
       .value_of("filename")
       .map(ToString::to_string)
@@ -177,27 +253,53 @@ fn webpage(
   ))
 }
 
-fn file_io_upload(mut data: &[u8]) -> Result<String, MainError> {
-  let mut req = Multipart::from_request(MultipartUreq(ureq::post("https://file.io")))?;
-  req.write_stream("file", &mut data, Some("file"), None)?;
-  let val = req.send()?.into_json()?;
-  if !val
-    .get("success")
-    .and_then(SerdeValue::as_bool)
-    .unwrap_or(false)
-  {
-    return Err(MainError::FileIO(
-      val
-        .get("message")
-        .and_then(SerdeValue::as_str)
-        .unwrap_or("[no message]")
-        .to_string(),
-    ));
+async fn self_hoster(
+  decrypt_js: Option<String>,
+  ciphertext: Option<Vec<u8>>,
+  req: Request<Body>,
+) -> Result<Response<Body>, http::Error> {
+  match (req.method(), req.uri().path(), decrypt_js, ciphertext) {
+    (&Method::GET, "/decrypt.js", Some(decryptjs), _) => Response::builder()
+      .header("Content-Type", "text/javascript")
+      .body(decryptjs.into()),
+    (&Method::GET, "/ciphertext", _, Some(ciphertext)) => Response::builder()
+      .header("Content-Type", "application/octet-stream")
+      .body(ciphertext.into()),
+    _ => {
+      let mut not_found = Response::default();
+      *not_found.status_mut() = StatusCode::NOT_FOUND;
+      Ok(not_found)
+    }
   }
-  match val.get("link").and_then(SerdeValue::as_str) {
-    Some(x) => Ok(x.to_string()),
-    None => Err(MainError::Upload),
-  }
+}
+
+enum DecryptSource {
+  Hosted(String, String),
+  Unhosted(String),
+}
+
+fn file_io_upload(data: &[u8]) -> Result<String, MainError> {
+  todo!()
+  // let mut req = Multipart::from_request(MultipartUreq(ureq::post("https://file.io")))?;
+  // req.write_stream("file", data, Some("file"), None)?;
+  // let val = req.send()?.into_json()?;
+  // if !val
+  //   .get("success")
+  //   .and_then(SerdeValue::as_bool)
+  //   .unwrap_or(false)
+  // {
+  //   return Err(MainError::FileIO(
+  //     val
+  //       .get("message")
+  //       .and_then(SerdeValue::as_str)
+  //       .unwrap_or("[no message]")
+  //       .to_string(),
+  //   ));
+  // }
+  // match val.get("link").and_then(SerdeValue::as_str) {
+  //   Some(x) => Ok(x.to_string()),
+  //   None => Err(MainError::Upload),
+  // }
 }
 
 fn output_qrcode(data: &str) -> Result<(), MainError> {
@@ -213,7 +315,7 @@ fn seal(rng: &impl SecureRandom, plaintext: Vec<u8>) -> Result<SealedMessage, Ma
   let (nonce, raw_nonce) = get_random_nonce(rng);
   let mut key = SealingKey::new(
     UnboundKey::new(&AES_256_GCM, &key_bytes)?,
-    OneNonceSequence::new(nonce),
+    OneNonceSequence(Some(nonce)),
   );
   let mut in_out = plaintext;
   key.seal_in_place_append_tag(Aad::empty(), &mut in_out)?;
@@ -242,47 +344,4 @@ fn get_random_nonce(rng: &impl SecureRandom) -> (Nonce, [u8; NONCE_LEN]) {
   let mut raw_nonce = [0u8; NONCE_LEN];
   rng.fill(&mut raw_nonce).unwrap();
   (Nonce::assume_unique_for_key(raw_nonce), raw_nonce)
-}
-
-struct MultipartUreq(ureq::Request);
-struct MultipartBuffer(ureq::Request, Vec<u8>);
-
-impl HttpRequest for MultipartUreq {
-  type Stream = MultipartBuffer;
-  type Error = std::io::Error;
-
-  fn apply_headers(&mut self, boundary: &str, content_len: Option<u64>) -> bool {
-    self.0.set(
-      "Content-Type",
-      &format!(r#"multipart/form-data;boundary="{}""#, boundary)[..],
-    );
-    if let Some(len) = content_len {
-      self.0.set("Content-Length", &len.to_string()[..]);
-    }
-    true
-  }
-
-  fn open_stream(self) -> Result<Self::Stream, Self::Error> {
-    Ok(MultipartBuffer(self.0, vec![]))
-  }
-}
-
-impl Write for MultipartBuffer {
-  fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
-    self.1.write(buf)
-  }
-
-  fn flush(&mut self) -> Result<(), std::io::Error> {
-    self.1.flush()
-  }
-}
-
-impl HttpStream for MultipartBuffer {
-  type Request = MultipartUreq;
-  type Response = ureq::Response;
-  type Error = std::io::Error;
-
-  fn finish(mut self) -> Result<Self::Response, Self::Error> {
-    Ok(self.0.send_bytes(&self.1[..]))
-  }
 }
