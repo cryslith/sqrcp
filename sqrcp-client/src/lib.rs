@@ -4,18 +4,9 @@ pub mod utils;
 use std::convert::TryInto;
 
 use ring::{
-  aead::{Aad, BoundKey, Nonce, NonceSequence, SealingKey, UnboundKey, AES_256_GCM, NONCE_LEN, OpeningKey},
+  aead::{Aad, BoundKey, Nonce, NonceSequence, UnboundKey, AES_256_GCM, NONCE_LEN, OpeningKey},
 };
 use wasm_bindgen::prelude::*;
-use thiserror::Error;
-
-fn trace<T>(x: T) -> T
-where
-  T: std::fmt::Debug,
-{
-  log!("[rust] {:?}", x);
-  x
-}
 
 #[wasm_bindgen]
 pub fn unseal(key: &[u8], nonce: &[u8], ciphertext: Vec<u8>) -> Result<Vec<u8>, JsValue> {

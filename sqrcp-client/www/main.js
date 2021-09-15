@@ -1,18 +1,7 @@
+const S = window.sqrcp_client;
+
 async function decrypt(key, nonce, ciphertext) {
-  return crypto.subtle.decrypt(
-    {
-      name: "AES-GCM",
-      iv: nonce,
-    },
-    await crypto.subtle.importKey(
-      "raw",
-      key,
-      {name: "AES-GCM"},
-      false,
-      ["decrypt"],
-    ),
-    ciphertext,
-  );
+  return S.unseal(key, nonce, ciphertext);
 }
 
 async function readAll(stream, length) {
@@ -38,7 +27,12 @@ async function readAll(stream, length) {
 }
 
 async function main(params) {
-  const { inline, ciphertext: cipherURL, key: keyBytes, nonce: nonceBytes, mimetype, filename } = params;
+  const { inline, ciphertext: cipherURL, key: keyBytes, nonce: nonceBytes, mimetype, filename, wasm, wasm_integrity } = params;
+
+  await S.init(fetch(wasm), {
+    integrity: wasm_integrity
+  });
+  S.set_panic_hook();
 
   let message = document.getElementById("message");
 
@@ -53,7 +47,7 @@ async function main(params) {
     // // on major mobile browsers yet
     // let ciphertext = await readAll(response.body.getReader(),
     //                                parseInt(response.headers.get("content-length"), 10) || -1);
-    let ciphertext = await response.arrayBuffer();
+    let ciphertext = new Uint8Array(await response.arrayBuffer());
     let plaintext = await decrypt(key, nonce, ciphertext);
 
     if (inline) {

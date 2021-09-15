@@ -64,7 +64,7 @@ async fn main() {
     )
     .arg(
       Arg::from_usage("-h, --host=[HOST] 'where javascript is hosted'")
-        .possible_values(&["inline", "self-host"])
+        .possible_values(&["self-host"])
         .default_value("self-host"),
     )
     .arg(
@@ -182,25 +182,27 @@ fn webpage(
     ciphertext,
   } = seal(&rng, plaintext)?;
 
-  let decryptjs = include_str!("decrypt.js");
+  let main_js = include_str!("../../sqrcp-client/www/main.js");
+  let mut crypto_js = include_str!("../../sqrcp-client/pkg/sqrcp_client.js").to_owned();
+  crypto_js.push_str(include_str!("../../sqrcp-client/www/sqrcp_client_expose.js"));
+  let crypto_wasm = include_bytes!("../../sqrcp-client/pkg/sqrcp_client_bg.wasm");
 
-  let host_decryptjs = if matches.value_of("host") == Some("self-host") {
-    Some(decryptjs.to_string())
-  } else {
-    None
-  };
-  let host_ciphertext = if matches.value_of("uploader") == Some("self-host") {
-    Some(ciphertext.clone())
-  } else {
-    None
-  };
-  let server = if host_decryptjs.is_some() || host_ciphertext.is_some() {
+  let mut content = HostedContent::default();
+  if matches.value_of("host") == Some("self-host") {
+    content.main_js = Some(main_js.to_owned());
+    content.crypto_js = Some(crypto_js.clone());
+    content.crypto_wasm = Some(crypto_wasm.to_vec());
+  }
+  if matches.value_of("uploader") == Some("self-host") {
+    content.ciphertext = Some(ciphertext.clone());
+  }
+
+  let server = if content != HostedContent::default() {
     let make_service = make_service_fn(move |_| {
-      let host_decryptjs1 = host_decryptjs.clone();
-      let host_ciphertext1 = host_ciphertext.clone();
+      let content = content.clone();
       async move {
         Ok::<_, hyper::Error>(service_fn(move |req| {
-          self_hoster(host_decryptjs1.clone(), host_ciphertext1.clone(), req)
+          self_hoster(content.clone(), req)
         }))
       }
     });
@@ -211,24 +213,42 @@ fn webpage(
   };
   let mut server_addr = if let Some(ref server) = server {
     let mut addr = server.local_addr();
-    let local_ip = datalink::interfaces().iter()
+    let local_ip = datalink::interfaces()
+      .iter()
       .find(|x| !x.is_loopback() && !x.ips.is_empty())
-      .ok_or(MainError::DetectLocalIP)?.ips[0].ip();
+      .ok_or(MainError::DetectLocalIP)?
+      .ips[0]
+      .ip();
     addr.set_ip(local_ip);
     Some(addr)
   } else {
     None
   };
 
-  let decryptjs_source = match matches.value_of("host").unwrap() {
+  let js_source = match matches.value_of("host").unwrap() {
     "self-host" => {
-      let integrity = format!(
+      let main_js_integrity = format!(
         "sha512-{}",
-        base64::encode(digest(&SHA512, decryptjs.as_bytes()).as_ref())
+        base64::encode(digest(&SHA512, main_js.as_bytes()).as_ref())
       );
-      DecryptSource::Hosted(format!("http://{}/decrypt.js", server_addr.unwrap()), integrity)
+      let crypto_js_integrity = format!(
+        "sha512-{}",
+        base64::encode(digest(&SHA512, crypto_js.as_bytes()).as_ref())
+      );
+      let crypto_wasm_integrity = format!(
+        "sha512-{}",
+        base64::encode(digest(&SHA512, crypto_wasm).as_ref())
+      );
+      let base = server_addr.unwrap();
+      JsSource {
+        main_js: format!("http://{}/main.js", base),
+        crypto_js: format!("http://{}/crypto.js", base),
+        crypto_wasm: format!("http://{}/crypto.wasm", base),
+        main_js_integrity,
+        crypto_js_integrity,
+        crypto_wasm_integrity,
+      }
     }
-    "inline" => DecryptSource::Unhosted(decryptjs.to_string()),
     _ => panic!("invalid host"),
   };
 
@@ -244,17 +264,17 @@ fn webpage(
 
   let mut context = Context::new();
   context.insert("inline", &inline);
-  match decryptjs_source {
-    DecryptSource::Hosted(url, integrity) => {
-      context.insert("hosted", &true);
-      context.insert("hosted_decrypt", &url);
-      context.insert("hosted_decrypt_integrity", &integrity);
-    }
-    DecryptSource::Unhosted(source) => {
-      context.insert("hosted", &false);
-      context.insert("unhosted_decrypt", &source);
-    }
-  }
+
+  context.insert("hosted_main", &js_source.main_js);
+  context.insert("hosted_main_integrity", &js_source.main_js_integrity);
+  context.insert("hosted_crypto", &js_source.crypto_js);
+  context.insert("hosted_crypto_integrity", &js_source.crypto_js_integrity);
+  context.insert("hosted_crypto_wasm", &js_source.crypto_wasm);
+  context.insert(
+    "hosted_crypto_wasm_integrity",
+    &js_source.crypto_wasm_integrity,
+  );
+
   context.insert("key", &format!("[{}]", key.into_iter().join(", ")));
   context.insert("nonce", &format!("[{}]", nonce.iter().join(", ")));
   context.insert("ciphertext", &ciphertext_url);
@@ -266,7 +286,11 @@ fn webpage(
       .map(ToString::to_string)
       .unwrap_or_else(|| format!("transfer-{}", Utc::now().format("%F-%T"))),
   );
-  let webpage = Tera::one_off(include_str!("receiver.html.tera"), &context, false)?;
+  let webpage = Tera::one_off(
+    include_str!("../../sqrcp-client/www/receiver.html.tera"),
+    &context,
+    false,
+  )?;
   let webpage = Regex::new(r#"[[:space:]]+"#)
     .unwrap()
     .replace_all(&webpage[..], " ");
@@ -279,18 +303,61 @@ fn webpage(
   ))
 }
 
-async fn self_hoster(
-  decrypt_js: Option<String>,
+#[derive(Clone, Default, PartialEq)]
+struct HostedContent {
+  main_js: Option<String>,
+  crypto_js: Option<String>,
+  crypto_wasm: Option<Vec<u8>>,
   ciphertext: Option<Vec<u8>>,
+}
+
+async fn self_hoster(
+  content: HostedContent,
   req: Request<Body>,
 ) -> Result<Response<Body>, http::Error> {
-  match (req.method(), req.uri().path(), decrypt_js, ciphertext) {
-    (&Method::GET, "/decrypt.js", Some(decryptjs), _) => Response::builder()
+  match (req.method(), req.uri().path(), content) {
+    (
+      &Method::GET,
+      "/main.js",
+      HostedContent {
+        main_js: Some(main_js),
+        ..
+      },
+    ) => Response::builder()
       .header("Content-Type", "text/javascript")
       .header("Access-Control-Allow-Origin", "*")
-      .body(decryptjs.into()),
-    (&Method::GET, "/ciphertext", _, Some(ciphertext)) => Response::builder()
-      .header("Content-Type", "application/octet-stream") 
+      .body(main_js.into()),
+    (
+      &Method::GET,
+      "/crypto.js",
+      HostedContent {
+        crypto_js: Some(crypto_js),
+        ..
+      },
+    ) => Response::builder()
+      .header("Content-Type", "text/javascript")
+      .header("Access-Control-Allow-Origin", "*")
+      .body(crypto_js.into()),
+    (
+      &Method::GET,
+      "/crypto.wasm",
+      HostedContent {
+        crypto_wasm: Some(crypto_wasm),
+        ..
+      },
+    ) => Response::builder()
+      .header("Content-Type", "application/wasm")
+      .header("Access-Control-Allow-Origin", "*")
+      .body(crypto_wasm.into()),
+    (
+      &Method::GET,
+      "/ciphertext",
+      HostedContent {
+        ciphertext: Some(ciphertext),
+        ..
+      },
+    ) => Response::builder()
+      .header("Content-Type", "application/octet-stream")
       .header("Access-Control-Allow-Origin", "*")
       .body(ciphertext.into()),
     _ => {
@@ -301,9 +368,13 @@ async fn self_hoster(
   }
 }
 
-enum DecryptSource {
-  Hosted(String, String),
-  Unhosted(String),
+struct JsSource {
+  main_js: String,
+  main_js_integrity: String,
+  crypto_js: String,
+  crypto_js_integrity: String,
+  crypto_wasm: String,
+  crypto_wasm_integrity: String,
 }
 
 fn file_io_upload(data: &[u8]) -> Result<String, MainError> {

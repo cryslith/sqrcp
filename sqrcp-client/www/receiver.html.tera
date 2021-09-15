@@ -7,13 +7,12 @@
     {% else %}
     <a id="download"></a>
     {% endif %}
-    {% if hosted %}
-    <script type="text/javascript" src="{{ hosted_decrypt }}"
-            integrity="{{ hosted_decrypt_integrity }}"
+    <script type="module" src="{{ hosted_crypto }}"
+            integrity="{{ hosted_crypto_integrity }}"
             crossorigin="anonymous"></script>
-    {% else %}
-    <script type="text/javascript">{{ unhosted_decrypt }}</script>
-    {% endif %}
+    <script type="text/javascript" src="{{ hosted_main }}"
+            integrity="{{ hosted_main_integrity }}"
+            crossorigin="anonymous"></script>
     <script type="text/javascript">
       main({
         inline: {{ inline }},
@@ -21,7 +20,9 @@
         key: {{ key }},
         nonce: {{ nonce }},
         mimetype: "{{ mimetype }}",
-        filename: "{{ filename }}"
+        filename: "{{ filename }}",
+        wasm: "{{ hosted_crypto_wasm }}",
+        wasm_integrity: "{{ hosted_crypto_wasm_integrity }}"
       });
     </script>
   </body>
