@@ -16,7 +16,8 @@ pub fn unseal(key: &[u8], nonce: &[u8], ciphertext: Vec<u8>) -> Result<Vec<u8>, 
     OneNonceSequence(Some(Nonce::assume_unique_for_key(nonce))),
   );
   let mut in_out = ciphertext;
-  opening_key.open_in_place(Aad::empty(), &mut in_out).map_err(|_| JsValue::from_str("decryption failed"))?;
+  let plaintext_len = opening_key.open_in_place(Aad::empty(), &mut in_out).map_err(|_| JsValue::from_str("decryption failed"))?.len();
+  in_out.truncate(plaintext_len);
   Ok(in_out)
 }
 

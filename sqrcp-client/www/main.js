@@ -1,6 +1,8 @@
 const S = window.sqrcp_client;
+console.log("top", S);
 
 async function decrypt(key, nonce, ciphertext) {
+console.log("dec", S);
   return S.unseal(key, nonce, ciphertext);
 }
 
@@ -27,6 +29,7 @@ async function readAll(stream, length) {
 }
 
 async function main(params) {
+  console.log("main", S);
   const { inline, ciphertext: cipherURL, key: keyBytes, nonce: nonceBytes, mimetype, filename, wasm, wasm_integrity } = params;
 
   await S.init(fetch(wasm), {
@@ -73,3 +76,5 @@ async function main(params) {
   console.log("success");
   message.parentNode.removeChild(message);
 }
+
+main(P);

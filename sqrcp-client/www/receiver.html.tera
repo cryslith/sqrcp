@@ -12,9 +12,9 @@
             crossorigin="anonymous"></script>
     <script type="text/javascript" src="{{ hosted_main }}"
             integrity="{{ hosted_main_integrity }}"
-            crossorigin="anonymous"></script>
+            crossorigin="anonymous" defer="true"></script>
     <script type="text/javascript">
-      main({
+      P = {
         inline: {{ inline }},
         ciphertext: "{{ ciphertext }}",
         key: {{ key }},
@@ -23,7 +23,7 @@
         filename: "{{ filename }}",
         wasm: "{{ hosted_crypto_wasm }}",
         wasm_integrity: "{{ hosted_crypto_wasm_integrity }}"
-      });
+      };
     </script>
   </body>
 </html>
