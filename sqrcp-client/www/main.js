@@ -1,19 +1,23 @@
 const S = window.sqrcp_client;
 
+function base64Decode(s) {
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0))
+}
+
 async function main(params) {
   const message = document.createElement("pre");
   message.textContent = "Loading...";
   document.body.appendChild(message);
 
   try {
-    const { inline, ciphertext: cipherURL, key: keyBytes, nonce: nonceBytes, mimetype, filename, wasm, wasm_integrity } = params;
+    const { i: inline, c: cipherURL, k: keyBytes64, n: nonceBytes64, m: mimetype, f: filename, w: wasm, W: wasm_integrity } = params;
 
     await S.init(fetch(wasm), {
       integrity: wasm_integrity
     });
     S.set_panic_hook();
-    const key = new Uint8Array(keyBytes);
-    const nonce = new Uint8Array(nonceBytes);
+    const key = base64Decode(keyBytes64);
+    const nonce = base64Decode(nonceBytes64);
     const response = await fetch(cipherURL);
     if (!response.ok) {
       throw new Error(`fetching ciphertext: ${response.statusText}`);
@@ -23,15 +27,15 @@ async function main(params) {
     const plaintext = S.unseal(key, nonce, ciphertext);
 
     if (inline) {
-      const dataview = new DataView(plaintext);
+      const dataview = new DataView(plaintext.buffer);
       const shorts = [];
       for (let i = 0; i < dataview.byteLength; i += 2) {
         shorts.push(dataview.getUint16(i, true));
       }
       const text = String.fromCharCode.apply(null, shorts);
-      const plaintext = document.createElement("pre");
-      plaintext.textContent = text;
-      document.body.appendChild(plaintext);
+      const plaintextE = document.createElement("pre");
+      plaintextE.textContent = text;
+      document.body.appendChild(plaintextE);
     } else {
       const download = document.createElement("a");
       const blob = new Blob([plaintext], {type: mimetype});

@@ -11,7 +11,6 @@ use hyper::{
   Body, Client, Method, Request, Response, Server, StatusCode,
 };
 use hyper_multipart_rfc7578::client::multipart;
-use itertools::Itertools;
 use pnet::datalink;
 use qrcodegen::{QrCode, QrCodeEcc};
 use regex::Regex;
@@ -278,8 +277,8 @@ async fn webpage(
     &js_source.crypto_wasm_integrity,
   );
 
-  context.insert("key", &format!("[{}]", key.into_iter().join(", ")));
-  context.insert("nonce", &format!("[{}]", nonce.iter().join(", ")));
+  context.insert("key", &base64::encode(key));
+  context.insert("nonce", &base64::encode(nonce));
   context.insert("ciphertext", &ciphertext_url);
   context.insert("mimetype", matches.value_of("mimetype").unwrap());
   context.insert(
@@ -297,6 +296,9 @@ async fn webpage(
   let webpage = Regex::new(r#"[[:space:]]+"#)
     .unwrap()
     .replace_all(&webpage[..], " ");
+  let webpage = Regex::new(r#"([^[:alpha:]"]) (.)|(.) ([[:^alpha:]]|$)"#)
+    .unwrap()
+    .replace_all(&webpage[..], "$1$3$2$4");
   Ok((
     format!(
       "data:text/html;charset=utf-8;base64,{}",

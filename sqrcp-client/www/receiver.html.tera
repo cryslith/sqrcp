@@ -3,20 +3,20 @@
   <body>
     <script type="module" src="{{ hosted_crypto }}"
             integrity="{{ hosted_crypto_integrity }}"
-            crossorigin="anonymous"></script>
-    <script type="text/javascript" src="{{ hosted_main }}"
+            crossorigin></script>
+    <script src="{{ hosted_main }}"
             integrity="{{ hosted_main_integrity }}"
-            crossorigin="anonymous" defer="true"></script>
-    <script type="text/javascript">
+            crossorigin defer></script>
+    <script>
       P = {
-        inline: {{ inline }},
-        ciphertext: "{{ ciphertext }}",
-        key: {{ key }},
-        nonce: {{ nonce }},
-        mimetype: "{{ mimetype }}",
-        filename: "{{ filename }}",
-        wasm: "{{ hosted_crypto_wasm }}",
-        wasm_integrity: "{{ hosted_crypto_wasm_integrity }}"
+        i: {{ inline }},
+        c: "{{ ciphertext }}",
+        k: "{{ key }}",
+        n: "{{ nonce }}",
+        m: "{{ mimetype }}",
+        f: "{{ filename }}",
+        w: "{{ hosted_crypto_wasm }}",
+        W: "{{ hosted_crypto_wasm_integrity }}"
       };
     </script>
   </body>
