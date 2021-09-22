@@ -9,12 +9,13 @@ base64 = "0.13.0"
 chrono = "0.4.19"
 clap = "2.33.3"
 hyper = { version = "0.14.12", features = ["full"] }
+hyper-multipart-rfc7578 = "0.5.1"
 itertools = "0.10.1"
-multipart = { version = "0.18.0", features = ["client", "hyper"], default-features = false }
 pnet = "0.28.0"
 qrcodegen = "=1.6.0"
 regex = "1.5.4"
 ring = "0.16.20"
+serde_json = "1.0.68"
 tera = { version = "1.12.1", default-features = false }
 tokio = { version = "1.11.0", features = ["full"] }
 thiserror = "1.0.29"

@@ -1,17 +1,17 @@
 use std::error::Error as _;
 use std::fs::File;
 use std::future::Future;
-use std::io::{stdin, Read, Write};
+use std::io::{stdin, Cursor, Read};
 
 use chrono::Utc;
 use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg, ArgMatches};
 use hyper::{
   http,
   service::{make_service_fn, service_fn},
-  Body, Method, Request, Response, Server, StatusCode,
+  Body, Client, Method, Request, Response, Server, StatusCode,
 };
+use hyper_multipart_rfc7578::client::multipart;
 use itertools::Itertools;
-use multipart::client::{HttpRequest, HttpStream, Multipart};
 use pnet::datalink;
 use qrcodegen::{QrCode, QrCodeEcc};
 use regex::Regex;
@@ -20,6 +20,7 @@ use ring::{
   digest::{digest, SHA512},
   rand::{SecureRandom, SystemRandom},
 };
+use serde_json::Value as SerdeValue;
 use tera::{Context, Tera};
 use thiserror::Error;
 
@@ -31,12 +32,16 @@ enum MainError {
   EncryptionFailed,
   #[error("file.io returned error: {0}")]
   FileIO(String),
-  #[error("error running self-host server")]
+  #[error(transparent)]
+  HTTP(#[from] http::Error),
+  #[error(transparent)]
   Hyper(#[from] hyper::Error),
   #[error(transparent)]
   IO(#[from] std::io::Error),
   #[error("upload failed")]
   Upload,
+  #[error(transparent)]
+  SerdeJson(#[from] serde_json::Error),
   #[error("webpage templating error")]
   Template(#[from] tera::Error),
   #[error("failed to transcode plaintext for inline display")]
@@ -124,8 +129,8 @@ async fn run(matches: ArgMatches<'_>) -> Result<(), MainError> {
 
   let (output, server) = match matches.value_of("mode").unwrap() {
     "data" => (data_url(&matches, &input[..])?, None),
-    "webpage" => webpage(&matches, input, false)?,
-    "inline-webpage" => webpage(&matches, input, true)?,
+    "webpage" => webpage(&matches, input, false).await?,
+    "inline-webpage" => webpage(&matches, input, true).await?,
     _ => panic!("invalid mode"),
   };
 
@@ -155,8 +160,8 @@ fn data_url(matches: &ArgMatches, data: &[u8]) -> Result<String, MainError> {
   ))
 }
 
-fn webpage(
-  matches: &ArgMatches,
+async fn webpage(
+  matches: &ArgMatches<'_>,
   mut plaintext: Vec<u8>,
   inline: bool,
 ) -> Result<
@@ -184,7 +189,9 @@ fn webpage(
 
   let main_js = include_str!("../../sqrcp-client/www/main.js");
   let mut crypto_js = include_str!("../../sqrcp-client/pkg/sqrcp_client.js").to_owned();
-  crypto_js.push_str(include_str!("../../sqrcp-client/www/sqrcp_client_expose.js"));
+  crypto_js.push_str(include_str!(
+    "../../sqrcp-client/www/sqrcp_client_expose.js"
+  ));
   let crypto_wasm = include_bytes!("../../sqrcp-client/pkg/sqrcp_client_bg.wasm");
 
   let mut content = HostedContent::default();
@@ -200,18 +207,14 @@ fn webpage(
   let server = if content != HostedContent::default() {
     let make_service = make_service_fn(move |_| {
       let content = content.clone();
-      async move {
-        Ok::<_, hyper::Error>(service_fn(move |req| {
-          self_hoster(content.clone(), req)
-        }))
-      }
+      async move { Ok::<_, hyper::Error>(service_fn(move |req| self_hoster(content.clone(), req))) }
     });
 
     Some(Server::bind(&([0, 0, 0, 0], 0).into()).serve(make_service))
   } else {
     None
   };
-  let mut server_addr = if let Some(ref server) = server {
+  let server_addr = if let Some(ref server) = server {
     let mut addr = server.local_addr();
     let local_ip = datalink::interfaces()
       .iter()
@@ -258,7 +261,7 @@ fn webpage(
       base64::encode(ciphertext),
     ),
     "self-host" => format!("http://{}/ciphertext", server_addr.unwrap()),
-    "file.io" => file_io_upload(&ciphertext[..])?,
+    "file.io" => file_io_upload(Cursor::new(ciphertext)).await?,
     _ => panic!("invalid uploader"),
   };
 
@@ -377,28 +380,31 @@ struct JsSource {
   crypto_wasm_integrity: String,
 }
 
-fn file_io_upload(data: &[u8]) -> Result<String, MainError> {
-  todo!()
-  // let mut req = Multipart::from_request(MultipartUreq(ureq::post("https://file.io")))?;
-  // req.write_stream("file", data, Some("file"), None)?;
-  // let val = req.send()?.into_json()?;
-  // if !val
-  //   .get("success")
-  //   .and_then(SerdeValue::as_bool)
-  //   .unwrap_or(false)
-  // {
-  //   return Err(MainError::FileIO(
-  //     val
-  //       .get("message")
-  //       .and_then(SerdeValue::as_str)
-  //       .unwrap_or("[no message]")
-  //       .to_string(),
-  //   ));
-  // }
-  // match val.get("link").and_then(SerdeValue::as_str) {
-  //   Some(x) => Ok(x.to_string()),
-  //   None => Err(MainError::Upload),
-  // }
+async fn file_io_upload(data: impl Read + Send + Sync + 'static) -> Result<String, MainError> {
+  let client = Client::new();
+  let mut form = multipart::Form::default();
+  form.add_reader_file("file", data, "file");
+  let req = form.set_body_convert::<hyper::Body, multipart::Body>(Request::post("https://file.io"))?;
+  let val: SerdeValue =
+    serde_json::from_slice(&hyper::body::to_bytes(client.request(req).await?.into_body()).await?)?;
+
+  if !val
+    .get("success")
+    .and_then(SerdeValue::as_bool)
+    .unwrap_or(false)
+  {
+    return Err(MainError::FileIO(
+      val
+        .get("message")
+        .and_then(SerdeValue::as_str)
+        .unwrap_or("[no message]")
+        .to_string(),
+    ));
+  }
+  match val.get("link").and_then(SerdeValue::as_str) {
+    Some(x) => Ok(x.to_string()),
+    None => Err(MainError::Upload),
+  }
 }
 
 fn output_qrcode(data: &str) -> Result<(), MainError> {
