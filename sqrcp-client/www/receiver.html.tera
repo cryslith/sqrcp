@@ -1,12 +1,6 @@
 <!DOCTYPE html>
 <html>
   <body>
-    <pre id="message">Loading...</pre>
-    {% if inline %}
-    <pre id="plaintext"></pre>
-    {% else %}
-    <a id="download"></a>
-    {% endif %}
     <script type="module" src="{{ hosted_crypto }}"
             integrity="{{ hosted_crypto_integrity }}"
             crossorigin="anonymous"></script>
