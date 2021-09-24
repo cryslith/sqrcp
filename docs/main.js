@@ -1,0 +1,1 @@
+../sqrcp-client/output/main.js
