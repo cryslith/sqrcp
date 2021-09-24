@@ -19,7 +19,6 @@ use ring::{
   digest::{digest, SHA512},
   rand::{SecureRandom, SystemRandom},
 };
-use serde_json::Value as SerdeValue;
 use tera::{Context, Tera};
 use thiserror::Error;
 
@@ -31,8 +30,6 @@ enum MainError {
   DetectLocalIP,
   #[error("encryption failed")]
   EncryptionFailed,
-  #[error("file.io returned error: {0}")]
-  FileIO(String),
   #[error(transparent)]
   HTTP(#[from] http::Error),
   #[error(transparent)]
@@ -41,8 +38,6 @@ enum MainError {
   IO(#[from] std::io::Error),
   #[error("upload failed")]
   Upload,
-  #[error(transparent)]
-  SerdeJson(#[from] serde_json::Error),
   #[error("webpage templating error")]
   Template(#[from] tera::Error),
   #[error("failed to transcode plaintext for inline display")]
@@ -75,7 +70,7 @@ async fn main() {
     )
     .arg(
       Arg::from_usage("-u, --uploader=[UPLOADER] 'where to upload ciphertext'")
-        .possible_values(&["test-inline", "self-host", "file.io", "catbox.moe"])
+        .possible_values(&["test-inline", "self-host", "catbox.moe"])
         .default_value("self-host"),
     )
     .arg(
@@ -254,7 +249,6 @@ async fn webpage(
       base64::encode(ciphertext),
     ),
     "self-host" => format!("http://{}/ciphertext", server_addr.unwrap()),
-    "file.io" => file_io_upload(Cursor::new(ciphertext)).await?,
     "catbox.moe" => catbox_moe_upload(Cursor::new(ciphertext)).await?,
     _ => panic!("invalid uploader"),
   };
@@ -370,34 +364,6 @@ struct JsSource {
   crypto_js: String,
   crypto_js_integrity: String,
   crypto_wasm: String,
-}
-
-async fn file_io_upload(data: impl Read + Send + Sync + 'static) -> Result<String, MainError> {
-  let client = Client::new();
-  let mut form = multipart::Form::default();
-  form.add_reader_file("file", data, "file");
-  let req =
-    form.set_body_convert::<hyper::Body, multipart::Body>(Request::post("http://file.io"))?;
-  let val: SerdeValue =
-    serde_json::from_slice(&hyper::body::to_bytes(client.request(req).await?.into_body()).await?)?;
-
-  if !val
-    .get("success")
-    .and_then(SerdeValue::as_bool)
-    .unwrap_or(false)
-  {
-    return Err(MainError::FileIO(
-      val
-        .get("message")
-        .and_then(SerdeValue::as_str)
-        .unwrap_or("[no message]")
-        .to_string(),
-    ));
-  }
-  match val.get("link").and_then(SerdeValue::as_str) {
-    Some(x) => Ok(x.to_string()),
-    None => Err(MainError::Upload),
-  }
 }
 
 async fn catbox_moe_upload(data: impl Read + Send + Sync + 'static) -> Result<String, MainError> {

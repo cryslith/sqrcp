@@ -1166,7 +1166,6 @@ dependencies = [
  "qrcodegen",
  "regex",
  "ring",
- "serde_json",
  "tera",
  "thiserror",
  "tokio",
