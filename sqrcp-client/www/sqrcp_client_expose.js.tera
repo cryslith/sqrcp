@@ -1,0 +1,11 @@
+function initSecure(wasm_url) {
+  return init(fetch(wasm_url, {
+    integrity: "{{ wasm_integrity }}"
+  }));
+}
+
+window.sqrcp_client = {
+  unseal,
+  set_panic_hook,
+  initSecure
+};

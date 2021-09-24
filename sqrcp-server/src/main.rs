@@ -25,6 +25,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 enum MainError {
+  #[error("catbox.moe returned error: {0}")]
+  CatboxMoe(String),
   #[error("couldn't autodetect local IP")]
   DetectLocalIP,
   #[error("encryption failed")]
@@ -73,7 +75,7 @@ async fn main() {
     )
     .arg(
       Arg::from_usage("-u, --uploader=[UPLOADER] 'where to upload ciphertext'")
-        .possible_values(&["test-inline", "self-host", "file.io"])
+        .possible_values(&["test-inline", "self-host", "file.io", "catbox.moe"])
         .default_value("self-host"),
     )
     .arg(
@@ -186,17 +188,14 @@ async fn webpage(
     ciphertext,
   } = seal(&rng, plaintext)?;
 
-  let main_js = include_str!("../../sqrcp-client/www/main.js");
-  let mut crypto_js = include_str!("../../sqrcp-client/pkg/sqrcp_client.js").to_owned();
-  crypto_js.push_str(include_str!(
-    "../../sqrcp-client/www/sqrcp_client_expose.js"
-  ));
-  let crypto_wasm = include_bytes!("../../sqrcp-client/pkg/sqrcp_client_bg.wasm");
+  let main_js = include_str!("../../sqrcp-client/output/main.js");
+  let crypto_js = include_str!("../../sqrcp-client/output/crypto.js");
+  let crypto_wasm = include_bytes!("../../sqrcp-client/output/crypto.wasm");
 
   let mut content = HostedContent::default();
   if matches.value_of("host") == Some("self-host") {
     content.main_js = Some(main_js.to_owned());
-    content.crypto_js = Some(crypto_js.clone());
+    content.crypto_js = Some(crypto_js.to_owned());
     content.crypto_wasm = Some(crypto_wasm.to_vec());
   }
   if matches.value_of("uploader") == Some("self-host") {
@@ -237,10 +236,6 @@ async fn webpage(
         "sha512-{}",
         base64::encode(digest(&SHA512, crypto_js.as_bytes()).as_ref())
       );
-      let crypto_wasm_integrity = format!(
-        "sha512-{}",
-        base64::encode(digest(&SHA512, crypto_wasm).as_ref())
-      );
       let base = server_addr.unwrap();
       JsSource {
         main_js: format!("http://{}/main.js", base),
@@ -248,7 +243,6 @@ async fn webpage(
         crypto_wasm: format!("http://{}/crypto.wasm", base),
         main_js_integrity,
         crypto_js_integrity,
-        crypto_wasm_integrity,
       }
     }
     _ => panic!("invalid host"),
@@ -261,6 +255,7 @@ async fn webpage(
     ),
     "self-host" => format!("http://{}/ciphertext", server_addr.unwrap()),
     "file.io" => file_io_upload(Cursor::new(ciphertext)).await?,
+    "catbox.moe" => catbox_moe_upload(Cursor::new(ciphertext)).await?,
     _ => panic!("invalid uploader"),
   };
 
@@ -272,10 +267,6 @@ async fn webpage(
   context.insert("hosted_crypto", &js_source.crypto_js);
   context.insert("hosted_crypto_integrity", &js_source.crypto_js_integrity);
   context.insert("hosted_crypto_wasm", &js_source.crypto_wasm);
-  context.insert(
-    "hosted_crypto_wasm_integrity",
-    &js_source.crypto_wasm_integrity,
-  );
 
   context.insert("key", &base64::encode(key));
   context.insert("nonce", &base64::encode(nonce));
@@ -379,14 +370,14 @@ struct JsSource {
   crypto_js: String,
   crypto_js_integrity: String,
   crypto_wasm: String,
-  crypto_wasm_integrity: String,
 }
 
 async fn file_io_upload(data: impl Read + Send + Sync + 'static) -> Result<String, MainError> {
   let client = Client::new();
   let mut form = multipart::Form::default();
   form.add_reader_file("file", data, "file");
-  let req = form.set_body_convert::<hyper::Body, multipart::Body>(Request::post("https://file.io"))?;
+  let req =
+    form.set_body_convert::<hyper::Body, multipart::Body>(Request::post("http://file.io"))?;
   let val: SerdeValue =
     serde_json::from_slice(&hyper::body::to_bytes(client.request(req).await?.into_body()).await?)?;
 
@@ -407,6 +398,29 @@ async fn file_io_upload(data: impl Read + Send + Sync + 'static) -> Result<Strin
     Some(x) => Ok(x.to_string()),
     None => Err(MainError::Upload),
   }
+}
+
+async fn catbox_moe_upload(data: impl Read + Send + Sync + 'static) -> Result<String, MainError> {
+  let https = hyper_rustls::HttpsConnector::with_native_roots();
+  let client = Client::builder().build::<_, hyper::Body>(https);
+  let mut form = multipart::Form::default();
+  form.add_text("reqtype", "fileupload");
+  form.add_text("time", "1h");
+  form.add_reader_file("fileToUpload", data, "fileToUpload");
+
+  let req = form.set_body_convert::<hyper::Body, multipart::Body>(Request::post(
+    "https://litterbox.catbox.moe/resources/internals/api.php",
+  ))?;
+  let response = client.request(req).await?;
+  let success = response.status().is_success();
+  let body = String::from_utf8(hyper::body::to_bytes(response.into_body()).await?.to_vec())
+    .map_err(|_| MainError::Upload)?;
+
+  if !success {
+    return Err(MainError::CatboxMoe(body));
+  }
+
+  Ok(body)
 }
 
 fn output_qrcode(data: &str) -> Result<(), MainError> {

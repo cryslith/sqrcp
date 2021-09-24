@@ -15,8 +15,7 @@
         n: "{{ nonce }}",
         m: "{{ mimetype }}",
         f: "{{ filename }}",
-        w: "{{ hosted_crypto_wasm }}",
-        W: "{{ hosted_crypto_wasm_integrity }}"
+        w: "{{ hosted_crypto_wasm }}"
       };
     </script>
   </body>

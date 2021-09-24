@@ -10,15 +10,13 @@ async function main(params) {
   document.body.appendChild(message);
 
   try {
-    const { i: inline, c: cipherURL, k: keyBytes64, n: nonceBytes64, m: mimetype, f: filename, w: wasm, W: wasm_integrity } = params;
+    const { i: inline, c: cipherURL, k: keyBytes64, n: nonceBytes64, m: mimetype, f: filename, w: wasm } = params;
 
-    await S.init(fetch(wasm), {
-      integrity: wasm_integrity
-    });
+    await S.initSecure(wasm);
     S.set_panic_hook();
     const key = base64Decode(keyBytes64);
     const nonce = base64Decode(nonceBytes64);
-    const response = await fetch(cipherURL);
+    const response = await fetch(cipherURL, {mode: "cors"});
     if (!response.ok) {
       throw new Error(`fetching ciphertext: ${response.statusText}`);
     }

@@ -10,6 +10,7 @@ chrono = "0.4.19"
 clap = "2.33.3"
 hyper = { version = "0.14.12", features = ["full"] }
 hyper-multipart-rfc7578 = "0.5.1"
+hyper-rustls = "0.22.1"
 pnet = "0.28.0"
 qrcodegen = "=1.6.0"
 regex = "1.5.4"
