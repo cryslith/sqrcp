@@ -65,7 +65,7 @@ async fn main() {
     )
     .arg(
       Arg::from_usage("-h, --host=[HOST] 'where javascript is hosted'")
-        .possible_values(&["self-host"])
+        .possible_values(&["self-host", "github.io"])
         .default_value("self-host"),
     )
     .arg(
@@ -221,21 +221,32 @@ async fn webpage(
     None
   };
 
+  let main_js_integrity = format!(
+    "sha512-{}",
+    base64::encode(digest(&SHA512, main_js.as_bytes()).as_ref())
+  );
+  let crypto_js_integrity = format!(
+    "sha512-{}",
+    base64::encode(digest(&SHA512, crypto_js.as_bytes()).as_ref())
+  );
+
   let js_source = match matches.value_of("host").unwrap() {
     "self-host" => {
-      let main_js_integrity = format!(
-        "sha512-{}",
-        base64::encode(digest(&SHA512, main_js.as_bytes()).as_ref())
-      );
-      let crypto_js_integrity = format!(
-        "sha512-{}",
-        base64::encode(digest(&SHA512, crypto_js.as_bytes()).as_ref())
-      );
       let base = server_addr.unwrap();
       JsSource {
         main_js: format!("http://{}/main.js", base),
         crypto_js: format!("http://{}/crypto.js", base),
         crypto_wasm: format!("http://{}/crypto.wasm", base),
+        main_js_integrity,
+        crypto_js_integrity,
+      }
+    }
+    "github.io" => {
+      let base = "https://cryslith.github.io/sqrcp";
+      JsSource {
+        main_js: format!("{}/main.js", base),
+        crypto_js: format!("{}/crypto.js", base),
+        crypto_wasm: format!("{}/crypto.wasm", base),
         main_js_integrity,
         crypto_js_integrity,
       }
